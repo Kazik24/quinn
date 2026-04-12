@@ -95,6 +95,7 @@ async fn server(endpoint: quinn::Endpoint, opt: Opt) -> Result<()> {
             if opt.stats {
                 println!("\nServer connection stats:\n{:#?}", connection.stats());
             }
+            connection.closed().await; // client will close the connection
         }));
     }
 
@@ -105,6 +106,7 @@ async fn server(endpoint: quinn::Endpoint, opt: Opt) -> Result<()> {
             eprintln!("Server task error: {e:?}");
         };
     }
+    endpoint.wait_idle().await;
 
     Ok(())
 }

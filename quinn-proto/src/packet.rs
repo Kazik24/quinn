@@ -575,11 +575,12 @@ impl ProtectedHeader {
 
     /// Decode a plain header from given buffer, with given [`ConnectionIdParser`].
     pub fn decode(
-        buf: &mut io::Cursor<BytesMut>,
+        buf: &mut impl Buf,
         cid_parser: &(impl ConnectionIdParser + ?Sized),
         supported_versions: &[u32],
         grease_quic_bit: bool,
     ) -> Result<Self, PacketDecodeError> {
+        let start_len = buf.remaining();
         let first = buf.get::<u8>()?;
         if !grease_quic_bit && first & FIXED_BIT == 0 {
             return Err(PacketDecodeError::InvalidHeader("fixed bit unset"));
@@ -598,6 +599,8 @@ impl ProtectedHeader {
                 .ok_or(PacketDecodeError::InvalidHeader("malformed cid"))?;
             let src_cid = ConnectionId::decode_long(buf)
                 .ok_or(PacketDecodeError::InvalidHeader("malformed cid"))?;
+
+            println!("src cid: {src_cid}, dst cid: {dst_cid}");
 
             // TODO: Support long CIDs for compatibility with future QUIC versions
             if version == 0 {
@@ -620,7 +623,7 @@ impl ProtectedHeader {
             match LongHeaderType::from_byte(first)? {
                 LongHeaderType::Initial => {
                     let token_len = buf.get_var()? as usize;
-                    let token_start = buf.position() as usize;
+                    let token_start = start_len - buf.remaining();
                     if token_len > buf.remaining() {
                         return Err(PacketDecodeError::InvalidHeader("token out of bounds"));
                     }

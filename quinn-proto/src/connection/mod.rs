@@ -2263,6 +2263,7 @@ impl Connection {
                 self.endpoint_config.grease_quic_bit,
             ) {
                 Ok((partial_decode, rest)) => {
+                    println!("Partial decode {self:p} dst: {}", partial_decode.dst_cid());
                     remaining = rest;
                     self.handle_decode(now, remote, ecn, partial_decode);
                 }

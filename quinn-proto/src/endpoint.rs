@@ -111,6 +111,7 @@ impl Endpoint {
             RetireConnectionId(now, seq, allow_more_cids) => {
                 if let Some(cid) = self.connections[ch].loc_cids.remove(&seq) {
                     trace!("peer retired CID {}: {}", seq, cid);
+                    println!("Retire cid({:?}): {}", self.connections[ch].side, cid);
                     self.index.retire(cid);
                     if allow_more_cids {
                         return Some(self.send_new_identifiers(now, ch, 1));
@@ -149,13 +150,16 @@ impl Endpoint {
             &self.config.supported_versions,
             self.config.grease_quic_bit,
         ) {
-            Ok((first_decode, remaining)) => DatagramConnectionEvent {
-                now,
-                remote,
-                ecn,
-                first_decode,
-                remaining,
-            },
+            Ok((first_decode, remaining)) => {
+                println!("First decode {self:p} dst: {}", first_decode.dst_cid());
+                DatagramConnectionEvent {
+                    now,
+                    remote,
+                    ecn,
+                    first_decode,
+                    remaining,
+                }
+            }
             Err(PacketDecodeError::UnsupportedVersion {
                 src_cid,
                 dst_cid,
@@ -389,6 +393,7 @@ impl Endpoint {
                 reset_token: ResetToken::new(&*self.config.reset_key, id),
             });
         }
+        println!("Send new identifiers ({:?}): {:?}", self.connections[ch].side, ids.len());
         ConnectionEvent(ConnectionEventInner::NewIdentifiers(ids, now))
     }
 
@@ -585,6 +590,7 @@ impl Endpoint {
 
         let ch = ConnectionHandle(self.connections.vacant_key());
         let loc_cid = self.new_cid(ch);
+        println!("Accepted assigned src id: {loc_cid}");
         let mut params = TransportParameters::new(
             &server_config.transport,
             &self.config,
@@ -822,6 +828,7 @@ impl Endpoint {
             loc_cids.insert(cids_issued, cid);
             cids_issued += 1;
         }
+        println!("initial connection ids({side:?}): {}", loc_cids.values().map(|v| v.to_string()).collect::<Vec<_>>().join(", "));
 
         let id = self.connections.insert(ConnectionMeta {
             init_cid,
@@ -1057,6 +1064,7 @@ impl ConnectionIndex {
         if conn.side.is_server() {
             self.remove_initial(conn.init_cid);
         }
+        println!("Close all cids({:?}): {}", conn.side, conn.loc_cids.values().map(|c| c.to_string()).collect::<Vec<_>>().join(", "));
         for cid in conn.loc_cids.values() {
             self.connection_ids.remove(cid);
         }

@@ -131,6 +131,7 @@ impl CidState {
 
     /// Update cid state when `NewIdentifiers` event is received
     pub(crate) fn new_cids(&mut self, ids: &[IssuedCid], now: Instant) {
+        println!("New identifiers: {}", ids.iter().map(|v| v.id.to_string()).collect::<Vec<_>>().join(", "));
         // `ids` could be `None` once active_connection_id_limit is set to 1 by peer
         let Some(last_cid) = ids.last() else {
             return;
