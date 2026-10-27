@@ -45,6 +45,7 @@ pub struct TransportConfig {
 
     pub(crate) persistent_congestion_threshold: u32,
     pub(crate) keep_alive_interval: Option<Duration>,
+    pub(crate) idle_notify: Option<Duration>,
     pub(crate) crypto_buffer_size: usize,
     pub(crate) allow_spin: bool,
     pub(crate) datagram_receive_buffer_size: Option<usize>,
@@ -400,6 +401,7 @@ impl Default for TransportConfig {
 
             persistent_congestion_threshold: 3,
             keep_alive_interval: None,
+            idle_notify: None,
             crypto_buffer_size: 16 * 1024,
             allow_spin: true,
             datagram_receive_buffer_size: Some(STREAM_RWND as usize),
@@ -437,6 +439,7 @@ impl fmt::Debug for TransportConfig {
             max_outgoing_bytes_per_second,
             persistent_congestion_threshold,
             keep_alive_interval,
+            idle_notify,
             crypto_buffer_size,
             allow_spin,
             datagram_receive_buffer_size,
@@ -473,6 +476,7 @@ impl fmt::Debug for TransportConfig {
                 persistent_congestion_threshold,
             )
             .field("keep_alive_interval", keep_alive_interval)
+            .field("idle_notify", idle_notify)
             .field("crypto_buffer_size", crypto_buffer_size)
             .field("allow_spin", allow_spin)
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)

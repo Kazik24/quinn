@@ -23,24 +23,24 @@ use crate::{
 /// This information allows us to fully decode and decrypt the packet.
 #[cfg_attr(test, derive(Clone))]
 #[derive(Debug)]
-pub struct PartialDecode {
+pub struct PartialDecode<T: SplitOff = BytesMut> {
     plain_header: ProtectedHeader,
-    buf: io::Cursor<BytesMut>,
+    buf: io::Cursor<T>,
 }
 
 #[allow(clippy::len_without_is_empty)]
-impl PartialDecode {
+impl<T: SplitOff> PartialDecode<T> {
     /// Begin decoding a QUIC packet from `bytes`, returning any trailing data not part of that packet
     pub fn new(
-        bytes: BytesMut,
+        bytes: T,
         cid_parser: &(impl ConnectionIdParser + ?Sized),
         supported_versions: &[u32],
         grease_quic_bit: bool,
-    ) -> Result<(Self, Option<BytesMut>), PacketDecodeError> {
+    ) -> Result<(Self, Option<T>), PacketDecodeError> {
         let mut buf = io::Cursor::new(bytes);
         let plain_header =
             ProtectedHeader::decode(&mut buf, cid_parser, supported_versions, grease_quic_bit)?;
-        let dgram_len = buf.get_ref().len();
+        let dgram_len = buf.get_ref().as_ref().len();
         let packet_len = plain_header
             .payload_len()
             .map(|len| (buf.position() + len) as usize)
@@ -59,7 +59,7 @@ impl PartialDecode {
 
     /// The underlying partially-decoded packet data
     pub(crate) fn data(&self) -> &[u8] {
-        self.buf.get_ref()
+        self.buf.get_ref().as_ref()
     }
 
     pub(crate) fn initial_header(&self) -> Option<&ProtectedInitialHeader> {
@@ -106,13 +106,16 @@ impl PartialDecode {
     /// Length of QUIC packet being decoded
     #[allow(unreachable_pub)] // fuzzing only
     pub fn len(&self) -> usize {
-        self.buf.get_ref().len()
+        self.buf.get_ref().as_ref().len()
     }
 
     pub(crate) fn finish(
         self,
         header_crypto: Option<&dyn crypto::HeaderKey>,
-    ) -> Result<Packet, PacketDecodeError> {
+    ) -> Result<Packet, PacketDecodeError>
+    where
+        T: AsMut<[u8]>,
+    {
         use ProtectedHeader::*;
         let Self {
             plain_header,
@@ -129,7 +132,7 @@ impl PartialDecode {
         {
             let number = Self::decrypt_header(&mut buf, header_crypto.unwrap())?;
             let header_len = buf.position() as usize;
-            let mut bytes = buf.into_inner();
+            let mut bytes = buf.into_inner().to_bytes_mut();
 
             let header_data = bytes.split_to(header_len).freeze();
             let token = header_data.slice(token_pos.start..token_pos.end);
@@ -171,7 +174,7 @@ impl PartialDecode {
             },
             Short { spin, dst_cid, .. } => {
                 let number = Self::decrypt_header(&mut buf, header_crypto.unwrap())?;
-                let key_phase = buf.get_ref()[0] & KEY_PHASE_BIT != 0;
+                let key_phase = buf.get_ref().as_ref()[0] & KEY_PHASE_BIT != 0;
                 Header::Short {
                     spin,
                     key_phase,
@@ -192,7 +195,7 @@ impl PartialDecode {
         };
 
         let header_len = buf.position() as usize;
-        let mut bytes = buf.into_inner();
+        let mut bytes = buf.into_inner().to_bytes_mut();
         Ok(Packet {
             header,
             header_data: bytes.split_to(header_len).freeze(),
@@ -201,10 +204,13 @@ impl PartialDecode {
     }
 
     fn decrypt_header(
-        buf: &mut io::Cursor<BytesMut>,
+        buf: &mut io::Cursor<T>,
         header_crypto: &dyn crypto::HeaderKey,
-    ) -> Result<PacketNumber, PacketDecodeError> {
-        let packet_length = buf.get_ref().len();
+    ) -> Result<PacketNumber, PacketDecodeError>
+    where
+        T: AsMut<[u8]>,
+    {
+        let packet_length = buf.get_ref().as_ref().len();
         let pn_offset = buf.position() as usize;
         if packet_length < pn_offset + 4 + header_crypto.sample_size() {
             return Err(PacketDecodeError::InvalidHeader(
@@ -212,10 +218,56 @@ impl PartialDecode {
             ));
         }
 
-        header_crypto.decrypt(pn_offset, buf.get_mut());
+        header_crypto.decrypt(pn_offset, buf.get_mut().as_mut());
 
-        let len = PacketNumber::decode_len(buf.get_ref()[0]);
+        let len = PacketNumber::decode_len(buf.get_ref().as_ref()[0]);
         PacketNumber::decode(len, buf)
+    }
+}
+#[allow(missing_docs)]
+pub trait SplitOff: AsRef<[u8]> {
+    fn split_off(&mut self, at: usize) -> Self;
+    fn to_bytes_mut(self) -> BytesMut;
+}
+
+impl SplitOff for BytesMut {
+    fn split_off(&mut self, at: usize) -> Self {
+        self.split_off(at)
+    }
+    fn to_bytes_mut(self) -> BytesMut {
+        self
+    }
+}
+impl SplitOff for Bytes {
+    fn split_off(&mut self, at: usize) -> Self {
+        self.split_off(at)
+    }
+    fn to_bytes_mut(self) -> BytesMut {
+        BytesMut::from(self)
+    }
+}
+impl SplitOff for &[u8] {
+    fn split_off(&mut self, at: usize) -> Self {
+        let (x, y) = self.split_at(at);
+        *self = x;
+        y
+    }
+    fn to_bytes_mut(self) -> BytesMut {
+        BytesMut::from(self)
+    }
+}
+impl<'a> SplitOff for &'a mut [u8] {
+    fn split_off(&mut self, at: usize) -> Self {
+        // different on panic from &[u8] impl
+        let this = std::mem::take(self);
+        let Some((x, y)) = this.split_at_mut_checked(at) else {
+            panic!("at > len");
+        };
+        *self = x;
+        y
+    }
+    fn to_bytes_mut(self) -> BytesMut {
+        BytesMut::from(&*self)
     }
 }
 
@@ -575,11 +627,12 @@ impl ProtectedHeader {
 
     /// Decode a plain header from given buffer, with given [`ConnectionIdParser`].
     pub fn decode(
-        buf: &mut io::Cursor<impl AsRef<[u8]>>,
+        buf: &mut impl Buf,
         cid_parser: &(impl ConnectionIdParser + ?Sized),
         supported_versions: &[u32],
         grease_quic_bit: bool,
     ) -> Result<Self, PacketDecodeError> {
+        let start_len = buf.remaining();
         let first = buf.get::<u8>()?;
         if !grease_quic_bit && first & FIXED_BIT == 0 {
             return Err(PacketDecodeError::InvalidHeader("fixed bit unset"));
@@ -620,7 +673,7 @@ impl ProtectedHeader {
             match LongHeaderType::from_byte(first)? {
                 LongHeaderType::Initial => {
                     let token_len = buf.get_var()? as usize;
-                    let token_start = buf.position() as usize;
+                    let token_start = start_len - buf.remaining();
                     if token_len > buf.remaining() {
                         return Err(PacketDecodeError::InvalidHeader("token out of bounds"));
                     }

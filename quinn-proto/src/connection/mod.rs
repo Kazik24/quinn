@@ -199,6 +199,8 @@ pub struct Connection {
     /// to be sending, so a time threshold is used instead.
     next_bundled_ack_time: Option<Instant>,
     timers: TimerTable,
+    idle_notify_interval: Option<Duration>,
+    idle_notify_next_deadline: Option<Instant>,
     /// Number of packets received which could not be authenticated
     authentication_failures: u64,
     /// Authenticated 1-RTT packets that arrived before the handshake completed, to be processed
@@ -330,6 +332,8 @@ impl Connection {
                 Some(dur) => Some(Duration::from_millis(dur.0)),
             },
             timers: TimerTable::default(),
+            idle_notify_interval: None,
+            idle_notify_next_deadline: None,
             authentication_failures: 0,
             early_1rtt: Vec::new(),
             error: None,
@@ -593,9 +597,11 @@ impl Connection {
             let tag_len = if let Some(crypto) = &self.spaces[space_id].crypto {
                 crypto.packet.local.tag_len()
             } else if space_id == SpaceId::Data {
-                self.zero_rtt_crypto.as_ref().expect(
-                    "sending packets in the application data space requires known 0-RTT or 1-RTT keys",
-                ).packet.tag_len()
+                self.zero_rtt_crypto
+                    .as_ref()
+                    .expect("sending packets in the application data space requires known 0-RTT or 1-RTT keys")
+                    .packet
+                    .tag_len()
             } else {
                 unreachable!("tried to send {:?} packet without keys", space_id)
             };
@@ -1276,6 +1282,10 @@ impl Connection {
                     self.spaces[SpaceId::Data]
                         .pending_acks
                         .on_max_ack_delay_timeout()
+                }
+                Timer::BeforeKeepAlive => {
+                    trace!("before keep-alive");
+                    self.events.push_back(Event::IdleNotification);
                 }
             }
         }
@@ -2075,11 +2085,17 @@ impl Connection {
     }
 
     fn reset_keep_alive(&mut self, now: Instant) {
-        let interval = match self.config.keep_alive_interval {
-            Some(x) if self.state.is_established() => x,
-            _ => return,
-        };
-        self.timers.set(Timer::KeepAlive, now + interval);
+        if !self.state.is_established() {
+            return;
+        }
+        if let Some(interval) = self.config.keep_alive_interval {
+            self.timers.set(Timer::KeepAlive, now + interval);
+        }
+        if let Some(interval) = self.idle_notify_interval {
+            let deadline = now + interval;
+            self.idle_notify_next_deadline = Some(deadline);
+            self.timers.set(Timer::BeforeKeepAlive, deadline);
+        }
     }
 
     fn reset_cid_retirement(&mut self) {
@@ -3678,12 +3694,14 @@ impl Connection {
             negotiate_max_idle_timeout(self.config.max_idle_timeout, Some(params.max_idle_timeout));
         trace!("negotiated max idle timeout {:?}", self.idle_timeout);
         if let Some(info) = params.preferred_address {
-            self.rem_cids.insert(NewConnectionId {
-                sequence: 1,
-                id: info.connection_id,
-                reset_token: info.stateless_reset_token,
-                retire_prior_to: 0,
-            }).expect("preferred address CID is the first received, and hence is guaranteed to be legal");
+            self.rem_cids
+                .insert(NewConnectionId {
+                    sequence: 1,
+                    id: info.connection_id,
+                    reset_token: info.stateless_reset_token,
+                    retire_prior_to: 0,
+                })
+                .expect("preferred address CID is the first received, and hence is guaranteed to be legal");
         }
         self.ack_frequency.peer_max_ack_delay = get_max_ack_delay(&params);
         self.peer_params = params;
@@ -4235,6 +4253,8 @@ pub enum Event {
     DatagramsUnblocked,
     /// The currently active path was updated
     PathUpdated,
+    /// Indicates that configured idle_notify timeout expired and application can take action
+    IdleNotification,
 }
 
 fn get_max_ack_delay(params: &TransportParameters) -> Duration {

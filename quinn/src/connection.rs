@@ -772,6 +772,11 @@ impl Connection {
         conn.wake();
     }
 
+    pub fn wait_for_idle(&self) -> impl Future<Output = ()> {
+        let mut conn = self.0.state.lock("wait_for_idle");
+        async {}
+    }
+
     /// Modify the number of remotely initiated bidirectional streams that may be concurrently open
     ///
     /// No streams may be opened by the peer unless fewer than `count` are already open. Large
@@ -1077,6 +1082,7 @@ pub(crate) struct Shared {
     stream_incoming: [Notify; 2],
     datagram_received: Notify,
     datagrams_unblocked: Notify,
+    idle_notified: Notify,
     closed: Notify,
     connected: Arc<Notify>,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
@@ -1295,6 +1301,9 @@ impl State {
                     let _ = self
                         .remote_address
                         .send_replace(self.inner.remote_address());
+                }
+                IdleNotification => {
+                    shared.idle_notified.notify_waiters();
                 }
                 _ => {}
             }
